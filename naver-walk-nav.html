@@ -178,6 +178,10 @@ let myMarker = null;
 let myAccuracyCircle = null;
 let watchId = null;
 
+let followMode = true;
+let isProgrammaticMove = false;
+let currentLatLng = null;
+
 // ── 지도 초기화 ──────────────────────────────────────
 function initMap() {
   document.getElementById('mapLoading').style.display = 'none';
@@ -187,7 +191,76 @@ function initMap() {
     zoom: 14,
   });
 
+  bindFollowEvents();
   startLiveTracking();
+}
+function bindFollowEvents() {
+  naver.maps.Event.addListener(map, 'dragstart', () => {
+    if (!isProgrammaticMove) {
+      followMode = false;
+      updateFollowButtonUI();
+    }
+  });
+
+  naver.maps.Event.addListener(map, 'zoom_changed', () => {
+    if (!isProgrammaticMove) {
+      followMode = false;
+      updateFollowButtonUI();
+    }
+  });
+}
+function updateFollowButtonUI() {
+  const btn = document.querySelector('.locate-btn');
+  if (!btn) return;
+
+  btn.style.opacity = followMode ? '1' : '0.6';
+  btn.style.transform = followMode ? 'scale(1.05)' : 'scale(1)';
+}
+function moveMapToMyLocation(latlng, zoom = 17) {
+  if (!map || !latlng) return;
+
+  isProgrammaticMove = true;
+  map.setCenter(latlng);
+  map.setZoom(zoom);
+
+  setTimeout(() => {
+    isProgrammaticMove = false;
+  }, 300);
+}
+function locateMe() {
+  followMode = true;
+  updateFollowButtonUI();
+
+  if (currentLatLng) {
+    moveMapToMyLocation(currentLatLng, 17);
+    return;
+  }
+
+  if (!navigator.geolocation) {
+    alert('이 브라우저는 위치 기능을 지원하지 않습니다.');
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    (p) => {
+      const lat = p.coords.latitude;
+      const lng = p.coords.longitude;
+      const accuracy = p.coords.accuracy;
+
+      currentLatLng = new naver.maps.LatLng(lat, lng);
+      updateMyLocationMarker(lat, lng, accuracy);
+      moveMapToMyLocation(currentLatLng, 17);
+    },
+    (err) => {
+      console.error('현재 위치 가져오기 실패:', err);
+      alert('현재 위치를 가져올 수 없습니다.');
+    },
+    {
+      enableHighAccuracy: true,
+      timeout: 10000,
+      maximumAge: 0
+    }
+  );
 }
 
 // ── 주소 → 좌표 ──────────────────────────────────────
@@ -304,8 +377,14 @@ function startLiveTracking() {
       const lng = p.coords.longitude;
       const accuracy = p.coords.accuracy;
 
+      currentLatLng = new naver.maps.LatLng(lat, lng);
+
       updateMyLocationMarker(lat, lng, accuracy);
       sendLocationToServer(lat, lng, accuracy);
+
+      if (followMode) {
+        moveMapToMyLocation(currentLatLng, map.getZoom() < 16 ? 17 : map.getZoom());
+      }
     },
     (err) => {
       console.error('실시간 위치 추적 실패:', err);
@@ -317,47 +396,6 @@ function startLiveTracking() {
     }
   );
 }
-
-// ── 한 번 내 위치로 이동 ──────────────────────────────
-function startLiveTracking() {
-  if (!navigator.geolocation) {
-    console.error('이 브라우저는 위치 추적을 지원하지 않습니다.');
-    return;
-  }
-
-  if (watchId !== null) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-
-  watchId = navigator.geolocation.watchPosition(
-    (p) => {
-      const lat = p.coords.latitude;
-      const lng = p.coords.longitude;
-      const accuracy = p.coords.accuracy;
-
-      const latlng = new naver.maps.LatLng(lat, lng);
-
-      // 파란 점 위치 업데이트
-      updateMyLocationMarker(lat, lng, accuracy);
-
-      // 서버에 위치 전송
-      sendLocationToServer(lat, lng, accuracy);
-
-      // 🔥 지도도 같이 이동
-      map.setCenter(latlng);
-    },
-    (err) => {
-      console.error('실시간 위치 추적 실패:', err);
-    },
-    {
-      enableHighAccuracy: true,
-      maximumAge: 1000,
-      timeout: 10000
-    }
-  );
-}
-
 // ── 경로 탐색 메인 ────────────────────────────────────
 async function startNavigation() {
   if (!map) {
