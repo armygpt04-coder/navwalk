@@ -25,7 +25,8 @@
   .search-input { width: 100%; background: var(--surface2); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: 'Noto Sans KR', sans-serif; font-size: 13px; padding: 8px 10px 8px 26px; outline: none; transition: border-color .2s; }
   .search-input:focus { border-color: var(--accent); }
   .btn-go { background: var(--accent); color: #000; border: none; border-radius: 8px; padding: 8px 18px; font-family: 'Noto Sans KR', sans-serif; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; transition: opacity .2s; }
-  .btn-go:hover { opacity: .85; } .btn-go:disabled { opacity: .5; cursor: not-allowed; }
+  .btn-go:hover { opacity: .85; }
+  .btn-go:disabled { opacity: .5; cursor: not-allowed; }
 
   .main { display: flex; flex: 1; overflow: hidden; }
   .map-area { flex: 1; position: relative; overflow: hidden; }
@@ -169,19 +170,24 @@
   </div>
 </div>
 
-<!-- 네이버 지도 API -->
 <script src="https://oapi.map.naver.com/openapi/v3/maps.js?ncpKeyId=6cm1gapanx&submodules=geocoder,geometry&callback=initMap"></script>
 
 <script>
 let map, startMarker, endMarker, routePolyline, currentSteps = [];
+let myMarker = null;
+let myAccuracyCircle = null;
+let watchId = null;
 
 // ── 지도 초기화 ──────────────────────────────────────
 function initMap() {
   document.getElementById('mapLoading').style.display = 'none';
+
   map = new naver.maps.Map('naverMap', {
     center: new naver.maps.LatLng(37.5751, 126.9769),
     zoom: 14,
   });
+
+  startLiveTracking();
 }
 
 // ── 주소 → 좌표 ──────────────────────────────────────
@@ -189,7 +195,7 @@ function geocode(address) {
   return new Promise((resolve, reject) => {
     naver.maps.Service.geocode({ query: address }, (status, res) => {
       if (status === naver.maps.Service.Status.ERROR || res.v2.meta.totalCount === 0) {
-        reject('주소를 찾을 수 없습니다: ' + address);
+        reject(new Error('주소를 찾을 수 없습니다: ' + address));
         return;
       }
       const item = res.v2.addresses[0];
@@ -205,7 +211,8 @@ function geocode(address) {
 // ── 마커 생성 ─────────────────────────────────────────
 function makeMarker(pos, color, label) {
   return new naver.maps.Marker({
-    map, position: pos,
+    map,
+    position: pos,
     icon: {
       content: `<div style="background:${color};color:#000;font-weight:700;font-size:11px;padding:4px 10px;border-radius:20px;white-space:nowrap;box-shadow:0 2px 8px rgba(0,0,0,.5);font-family:'Noto Sans KR',sans-serif;">${label}</div>`,
       anchor: new naver.maps.Point(0, 24),
@@ -213,50 +220,201 @@ function makeMarker(pos, color, label) {
   });
 }
 
+// ── 내 위치 마커 업데이트 ─────────────────────────────
+function updateMyLocationMarker(lat, lng, accuracy = 0) {
+  const latlng = new naver.maps.LatLng(lat, lng);
+
+  if (!myMarker) {
+    myMarker = new naver.maps.Marker({
+      map,
+      position: latlng,
+      icon: {
+        content: '<div style="width:14px;height:14px;border-radius:50%;background:#58a6ff;box-shadow:0 0 0 5px rgba(88,166,255,.3);border:2px solid #fff"></div>',
+        anchor: new naver.maps.Point(7, 7)
+      }
+    });
+  } else {
+    myMarker.setPosition(latlng);
+  }
+
+  if (!myAccuracyCircle) {
+    myAccuracyCircle = new naver.maps.Circle({
+      map,
+      center: latlng,
+      radius: accuracy,
+      fillColor: '#58a6ff',
+      fillOpacity: 0.12,
+      strokeColor: '#58a6ff',
+      strokeOpacity: 0.3,
+      strokeWeight: 1
+    });
+  } else {
+    myAccuracyCircle.setCenter(latlng);
+    myAccuracyCircle.setRadius(accuracy || 0);
+  }
+}
+
+// ── 현재 위치를 서버로 전송 ───────────────────────────
+async function sendLocationToServer(lat, lng, accuracy) {
+  try {
+    await fetch('/api/location', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        lat,
+        lng,
+        accuracy,
+        timestamp: Date.now()
+      })
+    });
+  } catch (err) {
+    console.error('위치 서버 전송 실패:', err);
+  }
+}
+
+// ── 좌표 → 주소, 출발지 입력칸 업데이트 ───────────────
+function updateStartAddressFromCoords(lat, lng) {
+  const latlng = new naver.maps.LatLng(lat, lng);
+
+  naver.maps.Service.reverseGeocode({ coords: latlng }, (st, res) => {
+    if (st === naver.maps.Service.Status.ERROR) return;
+
+    const addr = res.v2.address.roadAddress || res.v2.address.jibunAddress;
+    if (addr) {
+      document.getElementById('startInput').value = addr;
+    }
+  });
+}
+
+// ── 실시간 위치 추적 시작 ─────────────────────────────
+function startLiveTracking() {
+  if (!navigator.geolocation) {
+    console.error('이 브라우저는 위치 추적을 지원하지 않습니다.');
+    return;
+  }
+
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+
+  watchId = navigator.geolocation.watchPosition(
+    (p) => {
+      const lat = p.coords.latitude;
+      const lng = p.coords.longitude;
+      const accuracy = p.coords.accuracy;
+
+      updateMyLocationMarker(lat, lng, accuracy);
+      sendLocationToServer(lat, lng, accuracy);
+    },
+    (err) => {
+      console.error('실시간 위치 추적 실패:', err);
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 10000
+    }
+  );
+}
+
+// ── 한 번 내 위치로 이동 ──────────────────────────────
+function startLiveTracking() {
+  if (!navigator.geolocation) {
+    console.error('이 브라우저는 위치 추적을 지원하지 않습니다.');
+    return;
+  }
+
+  if (watchId !== null) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+
+  watchId = navigator.geolocation.watchPosition(
+    (p) => {
+      const lat = p.coords.latitude;
+      const lng = p.coords.longitude;
+      const accuracy = p.coords.accuracy;
+
+      const latlng = new naver.maps.LatLng(lat, lng);
+
+      // 파란 점 위치 업데이트
+      updateMyLocationMarker(lat, lng, accuracy);
+
+      // 서버에 위치 전송
+      sendLocationToServer(lat, lng, accuracy);
+
+      // 🔥 지도도 같이 이동
+      map.setCenter(latlng);
+    },
+    (err) => {
+      console.error('실시간 위치 추적 실패:', err);
+    },
+    {
+      enableHighAccuracy: true,
+      maximumAge: 1000,
+      timeout: 10000
+    }
+  );
+}
+
 // ── 경로 탐색 메인 ────────────────────────────────────
 async function startNavigation() {
-  if (!map) { alert('지도가 아직 로딩 중입니다.'); return; }
+  if (!map) {
+    alert('지도가 아직 로딩 중입니다.');
+    return;
+  }
 
   const startAddr = document.getElementById('startInput').value.trim();
-  const endAddr   = document.getElementById('endInput').value.trim();
-  if (!startAddr || !endAddr) { alert('출발지와 목적지를 입력하세요.'); return; }
+  const endAddr = document.getElementById('endInput').value.trim();
+
+  if (!startAddr || !endAddr) {
+    alert('출발지와 목적지를 입력하세요.');
+    return;
+  }
 
   const btn = document.getElementById('goBtn');
-  btn.disabled = true; btn.textContent = '탐색 중...';
+  btn.disabled = true;
+  btn.textContent = '탐색 중...';
+
   document.getElementById('turnList').innerHTML =
     '<div class="msg-box"><div class="spinner"></div><br>경로를 탐색하고 있습니다...</div>';
 
   try {
     // 1) 주소 → 좌표 변환
-    const [startData, endData] = await Promise.all([geocode(startAddr), geocode(endAddr)]);
+    const [startData, endData] = await Promise.all([
+      geocode(startAddr),
+      geocode(endAddr)
+    ]);
 
     // 2) 기존 레이어 제거
-    if (startMarker)   startMarker.setMap(null);
-    if (endMarker)     endMarker.setMap(null);
+    if (startMarker) startMarker.setMap(null);
+    if (endMarker) endMarker.setMap(null);
     if (routePolyline) routePolyline.setMap(null);
 
     // 3) 프록시 서버로 Directions5 API 호출
     const res = await fetch(
       `/api/directions?start=${startData.x},${startData.y}&goal=${endData.x},${endData.y}`
     );
+
     const data = await res.json();
 
     if (data.code !== 0) {
       throw new Error(data.message || '경로 탐색 실패');
     }
 
-    const route    = data.route.traoptimal[0];
-    const summary  = route.summary;
-    const distKm   = (summary.distance / 1000).toFixed(1);
-    const timeMin  = Math.round(summary.duration / 1000 / 60);
-    const cal      = Math.round(distKm * 60); // 보행 칼로리 (약 60kcal/km)
+    const route = data.route.traoptimal[0];
+    const summary = route.summary;
+    const distKm = (summary.distance / 1000).toFixed(1);
+    const timeMin = Math.round(summary.duration / 1000 / 60);
+    const cal = Math.round(Number(distKm) * 60);
 
     // 4) 통계 업데이트
-    document.getElementById('statDist').textContent    = distKm;
-    document.getElementById('statTime').textContent    = timeMin;
+    document.getElementById('statDist').textContent = distKm;
+    document.getElementById('statTime').textContent = timeMin;
     document.getElementById('statCalorie').textContent = cal;
 
-    // 5) 경로 폴리라인 그리기 (실제 도로 경로)
+    // 5) 경로 폴리라인 그리기
     const pathCoords = route.path.map(p => new naver.maps.LatLng(p[1], p[0]));
     routePolyline = new naver.maps.Polyline({
       map,
@@ -268,13 +426,13 @@ async function startNavigation() {
 
     // 6) 마커
     startMarker = makeMarker(startData.latlng, '#58a6ff', '🚶 ' + startAddr);
-    endMarker   = makeMarker(endData.latlng,   '#ff5252', '🏁 ' + endAddr);
+    endMarker = makeMarker(endData.latlng, '#ff5252', '🏁 ' + endAddr);
 
     // 7) 지도 범위 조정
     const bounds = new naver.maps.LatLngBounds(startData.latlng, endData.latlng);
     map.fitBounds(bounds, { padding: 80 });
 
-    // 8) 턴바이턴 목록 (실제 API steps 데이터)
+    // 8) 턴바이턴 목록
     buildTurnList(route.guide, startAddr, endAddr, distKm);
 
     // 9) 하단 안내 UI
@@ -284,17 +442,17 @@ async function startNavigation() {
     document.getElementById('nextIn').textContent = distKm + 'km 남음';
     document.getElementById('etaTime').innerHTML = timeMin + '<small style="font-size:13px">분</small>';
 
-  } catch(e) {
+  } catch (e) {
     document.getElementById('turnList').innerHTML =
       `<div class="error-box">⚠️ ${e.message || e}<br><br>서버가 실행 중인지 확인하고,<br>API 키가 올바른지 확인해주세요.</div>`;
     console.error(e);
   } finally {
-    btn.disabled = false; btn.textContent = '🚶 경로 탐색';
+    btn.disabled = false;
+    btn.textContent = '🚶 경로 탐색';
   }
 }
 
 // ── 턴바이턴 목록 렌더 ────────────────────────────────
-// Directions5 guide 타입 코드 → 아이콘/텍스트 매핑
 const GUIDE_TYPE = {
   1:  { icon: '↑',  label: '직진' },
   2:  { icon: '↗',  label: '우측 방향' },
@@ -309,7 +467,7 @@ const GUIDE_TYPE = {
   18: { icon: '↑',  label: '직진' },
 };
 
-function buildTurnList(guides, startAddr, endAddr, distKm) {
+function buildTurnList(guides) {
   const list = document.getElementById('turnList');
   list.innerHTML = '';
   currentSteps = guides || [];
@@ -320,7 +478,7 @@ function buildTurnList(guides, startAddr, endAddr, distKm) {
   }
 
   guides.forEach((g, i) => {
-    const type    = GUIDE_TYPE[g.type] || { icon: '•', label: '이동' };
+    const type = GUIDE_TYPE[g.type] || { icon: '•', label: '이동' };
     const distStr = g.distance >= 1000
       ? (g.distance / 1000).toFixed(1) + ' km'
       : g.distance + ' m';
@@ -334,10 +492,11 @@ function buildTurnList(guides, startAddr, endAddr, distKm) {
         <div class="turn-dist">${distStr}</div>
       </div>
       <span class="turn-type">${type.label}</span>`;
+
     el.onclick = () => {
       document.querySelectorAll('.turn-item').forEach(e => e.classList.remove('active-turn'));
       el.classList.add('active-turn');
-      // 클릭한 지점으로 지도 이동
+
       if (g.pointIndex !== undefined && routePolyline) {
         const path = routePolyline.getPath();
         if (path.getAt(g.pointIndex)) {
@@ -346,54 +505,45 @@ function buildTurnList(guides, startAddr, endAddr, distKm) {
         }
       }
     };
+
     list.appendChild(el);
   });
 }
 
-// ── 내 위치 ───────────────────────────────────────────
-let myMarker = null;
-function locateMe() {
-  if (!navigator.geolocation) { alert('위치 서비스를 지원하지 않습니다.'); return; }
-  navigator.geolocation.getCurrentPosition(p => {
-    const latlng = new naver.maps.LatLng(p.coords.latitude, p.coords.longitude);
-    map.setCenter(latlng); map.setZoom(15);
-    if (myMarker) myMarker.setMap(null);
-    myMarker = new naver.maps.Marker({
-      map, position: latlng,
-      icon: {
-        content: '<div style="width:14px;height:14px;border-radius:50%;background:#58a6ff;box-shadow:0 0 0 5px rgba(88,166,255,.3)"></div>',
-        anchor: new naver.maps.Point(7, 7)
-      }
-    });
-    naver.maps.Service.reverseGeocode({ coords: latlng }, (st, res) => {
-      if (st !== naver.maps.Service.Status.ERROR) {
-        const addr = res.v2.address.roadAddress || res.v2.address.jibunAddress;
-        if (addr) document.getElementById('startInput').value = addr;
-      }
-    });
-  }, () => alert('위치를 가져올 수 없습니다.'));
-}
-
 // ── 장소 검색 ─────────────────────────────────────────
 let searchTimer;
+
 function searchPlaces(q) {
   clearTimeout(searchTimer);
+
   const list = document.getElementById('placeList');
-  if (!q.trim()) { list.innerHTML = '<div class="msg-box">검색어를 입력하세요</div>'; return; }
-  if (typeof naver === 'undefined') {
-    list.innerHTML = '<div class="msg-box">지도 로딩 중입니다.</div>'; return;
+
+  if (!q.trim()) {
+    list.innerHTML = '<div class="msg-box">검색어를 입력하세요</div>';
+    return;
   }
+
+  if (typeof naver === 'undefined') {
+    list.innerHTML = '<div class="msg-box">지도 로딩 중입니다.</div>';
+    return;
+  }
+
   list.innerHTML = '<div class="msg-box"><div class="spinner"></div><br>검색 중...</div>';
+
   searchTimer = setTimeout(() => {
     naver.maps.Service.geocode({ query: q }, (status, res) => {
       if (status === naver.maps.Service.Status.ERROR || res.v2.meta.totalCount === 0) {
-        list.innerHTML = '<div class="msg-box">검색 결과가 없습니다.</div>'; return;
+        list.innerHTML = '<div class="msg-box">검색 결과가 없습니다.</div>';
+        return;
       }
+
       list.innerHTML = '';
+
       res.v2.addresses.slice(0, 8).forEach(item => {
-        const road  = item.roadAddress || item.jibunAddress;
+        const road = item.roadAddress || item.jibunAddress;
         const jibun = item.jibunAddress || '';
-        const pos   = new naver.maps.LatLng(parseFloat(item.y), parseFloat(item.x));
+        const pos = new naver.maps.LatLng(parseFloat(item.y), parseFloat(item.x));
+
         const div = document.createElement('div');
         div.className = 'place-item';
         div.innerHTML = `
@@ -402,11 +552,16 @@ function searchPlaces(q) {
             <div class="place-name">${road.split(' ').slice(0, 4).join(' ')}</div>
             <div class="place-addr">${jibun || road}</div>
           </div>`;
+
         div.onclick = () => {
           document.getElementById('endInput').value = road;
-          if (map) { map.setCenter(pos); map.setZoom(15); }
+          if (map) {
+            map.setCenter(pos);
+            map.setZoom(15);
+          }
           switchTab('route', document.querySelector('.tab'));
         };
+
         list.appendChild(div);
       });
     });
