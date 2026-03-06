@@ -182,6 +182,11 @@ let followMode = true;
 let isProgrammaticMove = false;
 let currentLatLng = null;
 
+let navigationSteps = [];
+let currentStepIndex = 0;
+let destinationLabel = '';
+let routeSummaryData = null;
+
 // ── 지도 초기화 ──────────────────────────────────────
 function initMap() {
   document.getElementById('mapLoading').style.display = 'none';
@@ -192,6 +197,148 @@ function initMap() {
   });
 
   bindFollowEvents();
+  function bindStartInputEvents() {
+  const startInput = document.getElementById('startInput');
+  if (!startInput) return;
+
+  startInput.addEventListener('input', () => {
+    if (startInput.value.trim() !== '내 위치') {
+      startInput.dataset.useCurrentLocation = 'false';
+    }
+  });
+}
+
+function setCurrentLocationAsStart(lat, lng) {
+  const startInput = document.getElementById('startInput');
+  if (!startInput) return;
+
+  startInput.value = '내 위치';
+  startInput.dataset.useCurrentLocation = 'true';
+  startInput.dataset.lat = String(lat);
+  startInput.dataset.lng = String(lng);
+}
+
+function getDistanceMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = (deg) => deg * Math.PI / 180;
+
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLng / 2) * Math.sin(dLng / 2);
+
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function buildNavigationSteps(path, guides) {
+  if (!Array.isArray(path) || !Array.isArray(guides)) {
+    navigationSteps = [];
+    currentStepIndex = 0;
+    return;
+  }
+
+  navigationSteps = guides
+    .filter(g => typeof g.pointIndex === 'number' && path[g.pointIndex])
+    .map((g, idx) => {
+      const point = path[g.pointIndex];
+      const type = GUIDE_TYPE[g.type] || { icon: '•', label: '이동' };
+
+      return {
+        index: idx,
+        pointIndex: g.pointIndex,
+        type: g.type,
+        icon: type.icon,
+        label: type.label,
+        instruction: g.instructions || type.label,
+        distance: Number(g.distance || 0),
+        lat: Number(point[1]),
+        lng: Number(point[0]),
+      };
+    });
+
+  currentStepIndex = 0;
+}
+
+function updateActiveTurnItem(index) {
+  const items = document.querySelectorAll('.turn-item');
+  items.forEach((item, i) => {
+    item.classList.toggle('active-turn', i === index);
+  });
+
+  if (items[index]) {
+    items[index].scrollIntoView({
+      block: 'nearest',
+      behavior: 'smooth'
+    });
+  }
+}
+
+function updateNavIndicator(step, remainDistance) {
+  const navIndicator = document.getElementById('navIndicator');
+  const walkingBadge = document.getElementById('walkingBadge');
+  const nextTurnIcon = document.getElementById('nextTurnIcon');
+  const nextIn = document.getElementById('nextIn');
+  const nextStreet = document.getElementById('nextStreet');
+  const etaTime = document.getElementById('etaTime');
+
+  navIndicator.style.display = 'flex';
+  walkingBadge.style.display = 'flex';
+
+  if (!step) {
+    nextTurnIcon.textContent = '🚶';
+    nextIn.textContent = '경로 안내';
+    nextStreet.textContent = destinationLabel ? `${destinationLabel} 방향` : '목적지 방향';
+
+    if (routeSummaryData) {
+      etaTime.innerHTML = `${routeSummaryData.timeMin}<small style="font-size:13px">분</small>`;
+    }
+    return;
+  }
+
+  nextTurnIcon.textContent = step.icon || '🚶';
+
+  if (remainDistance <= 10) {
+    nextIn.textContent = '지금';
+  } else {
+    nextIn.textContent = `${Math.round(remainDistance)}m 후`;
+  }
+
+  nextStreet.textContent = step.instruction;
+
+  if (routeSummaryData) {
+    etaTime.innerHTML = `${routeSummaryData.timeMin}<small style="font-size:13px">분</small>`;
+  }
+}
+
+function updateNavigationByLocation(lat, lng) {
+  if (!navigationSteps.length) return;
+
+  const currentStep = navigationSteps[currentStepIndex];
+  if (!currentStep) return;
+
+  const distToCurrent = getDistanceMeters(lat, lng, currentStep.lat, currentStep.lng);
+
+  if (distToCurrent < 15 && currentStepIndex < navigationSteps.length - 1) {
+    currentStepIndex += 1;
+  }
+
+  const step = navigationSteps[currentStepIndex];
+  const remainDistance = getDistanceMeters(lat, lng, step.lat, step.lng);
+
+  updateActiveTurnItem(currentStepIndex);
+  updateNavIndicator(step, remainDistance);
+
+  if (currentStepIndex === navigationSteps.length - 1 && remainDistance < 20) {
+    document.getElementById('nextTurnIcon').textContent = '🏁';
+    document.getElementById('nextIn').textContent = '도착';
+    document.getElementById('nextStreet').textContent = '목적지에 거의 도착했습니다';
+  }
+}
+  bindStartInputEvents();
   startLiveTracking();
 }
 function bindFollowEvents() {
@@ -232,6 +379,7 @@ function locateMe() {
   updateFollowButtonUI();
 
   if (currentLatLng) {
+    setCurrentLocationAsStart(currentLatLng.lat(), currentLatLng.lng());
     moveMapToMyLocation(currentLatLng, 17);
     return;
   }
@@ -249,6 +397,7 @@ function locateMe() {
 
       currentLatLng = new naver.maps.LatLng(lat, lng);
       updateMyLocationMarker(lat, lng, accuracy);
+      setCurrentLocationAsStart(lat, lng);
       moveMapToMyLocation(currentLatLng, 17);
     },
     (err) => {
@@ -262,7 +411,6 @@ function locateMe() {
     }
   );
 }
-
 // ── 주소 → 좌표 ──────────────────────────────────────
 function geocode(address) {
   return new Promise((resolve, reject) => {
@@ -381,9 +529,14 @@ function startLiveTracking() {
 
       updateMyLocationMarker(lat, lng, accuracy);
       sendLocationToServer(lat, lng, accuracy);
+      setCurrentLocationAsStart(lat, lng);
+      updateNavigationByLocation(lat, lng);
 
       if (followMode) {
-        moveMapToMyLocation(currentLatLng, map.getZoom() < 16 ? 17 : map.getZoom());
+        moveMapToMyLocation(
+          currentLatLng,
+          map && map.getZoom() < 16 ? 17 : (map ? map.getZoom() : 17)
+        );
       }
     },
     (err) => {
@@ -403,11 +556,17 @@ async function startNavigation() {
     return;
   }
 
-  const startAddr = document.getElementById('startInput').value.trim();
-  const endAddr = document.getElementById('endInput').value.trim();
+  const startInput = document.getElementById('startInput');
+  const endInput = document.getElementById('endInput');
+  const endAddr = endInput.value.trim();
 
-  if (!startAddr || !endAddr) {
-    alert('출발지와 목적지를 입력하세요.');
+  if (!endAddr) {
+    alert('목적지를 입력하세요.');
+    return;
+  }
+
+  if (!currentLatLng) {
+    alert('현재 위치를 아직 가져오지 못했습니다. 잠시 후 다시 시도하세요.');
     return;
   }
 
@@ -419,18 +578,19 @@ async function startNavigation() {
     '<div class="msg-box"><div class="spinner"></div><br>경로를 탐색하고 있습니다...</div>';
 
   try {
-    // 1) 주소 → 좌표 변환
-    const [startData, endData] = await Promise.all([
-      geocode(startAddr),
-      geocode(endAddr)
-    ]);
+    const startData = {
+      latlng: currentLatLng,
+      x: currentLatLng.lng(),
+      y: currentLatLng.lat(),
+      label: '내 위치'
+    };
 
-    // 2) 기존 레이어 제거
+    const endData = await geocode(endAddr);
+
     if (startMarker) startMarker.setMap(null);
     if (endMarker) endMarker.setMap(null);
     if (routePolyline) routePolyline.setMap(null);
 
-    // 3) 프록시 서버로 Directions5 API 호출
     const res = await fetch(
       `/api/directions?start=${startData.x},${startData.y}&goal=${endData.x},${endData.y}`
     );
@@ -447,12 +607,18 @@ async function startNavigation() {
     const timeMin = Math.round(summary.duration / 1000 / 60);
     const cal = Math.round(Number(distKm) * 60);
 
-    // 4) 통계 업데이트
+    routeSummaryData = {
+      distanceKm: distKm,
+      timeMin,
+      calorie: cal
+    };
+
+    destinationLabel = endAddr;
+
     document.getElementById('statDist').textContent = distKm;
     document.getElementById('statTime').textContent = timeMin;
     document.getElementById('statCalorie').textContent = cal;
 
-    // 5) 경로 폴리라인 그리기
     const pathCoords = route.path.map(p => new naver.maps.LatLng(p[1], p[0]));
     routePolyline = new naver.maps.Polyline({
       map,
@@ -462,23 +628,38 @@ async function startNavigation() {
       strokeWeight: 5,
     });
 
-    // 6) 마커
-    startMarker = makeMarker(startData.latlng, '#58a6ff', '🚶 ' + startAddr);
+    startMarker = makeMarker(startData.latlng, '#58a6ff', '🚶 내 위치');
     endMarker = makeMarker(endData.latlng, '#ff5252', '🏁 ' + endAddr);
 
-    // 7) 지도 범위 조정
-    const bounds = new naver.maps.LatLngBounds(startData.latlng, endData.latlng);
+    const bounds = new naver.maps.LatLngBounds();
+    pathCoords.forEach(pos => bounds.extend(pos));
     map.fitBounds(bounds, { padding: 80 });
 
-    // 8) 턴바이턴 목록
-    buildTurnList(route.guide, startAddr, endAddr, distKm);
+    buildTurnList(route.guide || []);
+    buildNavigationSteps(route.path || [], route.guide || []);
 
-    // 9) 하단 안내 UI
     document.getElementById('navIndicator').style.display = 'flex';
     document.getElementById('walkingBadge').style.display = 'flex';
-    document.getElementById('nextStreet').textContent = endAddr + ' 방향';
-    document.getElementById('nextIn').textContent = distKm + 'km 남음';
-    document.getElementById('etaTime').innerHTML = timeMin + '<small style="font-size:13px">분</small>';
+
+    updateNavIndicator(
+      navigationSteps[0] || null,
+      navigationSteps[0]
+        ? getDistanceMeters(
+            currentLatLng.lat(),
+            currentLatLng.lng(),
+            navigationSteps[0].lat,
+            navigationSteps[0].lng
+          )
+        : 0
+    );
+
+    updateNavigationByLocation(currentLatLng.lat(), currentLatLng.lng());
+
+    followMode = true;
+    updateFollowButtonUI();
+
+    startInput.value = '내 위치';
+    startInput.dataset.useCurrentLocation = 'true';
 
   } catch (e) {
     document.getElementById('turnList').innerHTML =
@@ -489,7 +670,6 @@ async function startNavigation() {
     btn.textContent = '🚶 경로 탐색';
   }
 }
-
 // ── 턴바이턴 목록 렌더 ────────────────────────────────
 const GUIDE_TYPE = {
   1:  { icon: '↑',  label: '직진' },
@@ -538,8 +718,16 @@ function buildTurnList(guides) {
       if (g.pointIndex !== undefined && routePolyline) {
         const path = routePolyline.getPath();
         if (path.getAt(g.pointIndex)) {
+          isProgrammaticMove = true;
+          followMode = false;
+          updateFollowButtonUI();
+
           map.setCenter(path.getAt(g.pointIndex));
           map.setZoom(16);
+
+          setTimeout(() => {
+            isProgrammaticMove = false;
+          }, 250);
         }
       }
     };
